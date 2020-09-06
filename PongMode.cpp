@@ -6,8 +6,6 @@
 //for glm::value_ptr() :
 #include <glm/gtc/type_ptr.hpp>
 
-#include <random>
-
 PongMode::PongMode() {
 
 	//set up trail as if ball has been here for 'forever':
@@ -133,21 +131,30 @@ bool PongMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 
 void PongMode::update(float elapsed) {
 
-	static std::mt19937 mt; //mersenne twister pseudo-random number generator
+	if (time_elapsed < max_speed_time)
+		time_elapsed += elapsed;
 
 	//----- paddle update -----
 
 	{ //right player ai:
+		// Right player ai gets faster as you score more points on it
+		float ai_diff = ai_diff_min + (left_score / ai_diff_max_pts) * ai_diff_max;
 		ai_offset_update -= elapsed;
 		if (ai_offset_update < elapsed) {
-			//update again in [0.5,1.0) seconds:
-			ai_offset_update = (mt() / float(mt.max())) * 0.5f + 0.5f;
-			ai_offset = (mt() / float(mt.max())) * 2.5f - 1.25f;
+			//update consistently every 0.5 seconds
+			//ai_offset_update = (mt() / float(mt.max())) * 0.5f + 0.5f;
+
+			// generally aim at target
+			target_offset = (target.y > 0.0f) ? -0.75f : 0.75f;
+
+			// add some randomness to ai paddle
+			ai_offset = (mt() / float(mt.max())) * 1.0f - 0.5f + target_offset;
 		}
 		if (right_paddle.y < ball.y + ai_offset) {
-			right_paddle.y = std::min(ball.y + ai_offset, right_paddle.y + 2.0f * elapsed);
-		} else {
-			right_paddle.y = std::max(ball.y + ai_offset, right_paddle.y - 2.0f * elapsed);
+			right_paddle.y = std::min(ball.y + ai_offset, right_paddle.y + ai_diff * elapsed);
+		}
+		else {
+			right_paddle.y = std::max(ball.y + ai_offset, right_paddle.y - ai_diff * elapsed);
 		}
 	}
 
@@ -158,26 +165,46 @@ void PongMode::update(float elapsed) {
 	left_paddle.y = std::max(left_paddle.y, -court_radius.y + paddle_radius.y);
 	left_paddle.y = std::min(left_paddle.y,  court_radius.y - paddle_radius.y);
 
+	// Track paddle velocity
+	ai_vel = right_paddle.y - right_pos;
+	right_pos = right_paddle.y;
+
+	player_vel = left_paddle.y - left_pos;
+	left_pos = left_paddle.y;
+
 	//----- ball update -----
 
 	//speed of ball doubles every four points:
-	float speed_multiplier = 4.0f * std::pow(2.0f, (left_score + right_score) / 4.0f);
+	//float speed_multiplier = 4.0f * std::pow(2.0f, (left_score + right_score) / 4.0f);
+
+	//speed of ball increases over time
+	float speed_multiplier = 4.0f + (time_elapsed / max_speed_time) * max_ball_speed;
+
+	if (ball_boost)
+		speed_multiplier = max_ball_speed + 5.0f;
 
 	//velocity cap, though (otherwise ball can pass through paddles):
-	speed_multiplier = std::min(speed_multiplier, 10.0f);
+	speed_multiplier = std::min(speed_multiplier, max_ball_speed);
 
+	if (bend < bend_factor)
+	{
+		ball_velocity.y += elapsed * curve;
+		bend += glm::abs(elapsed * curve);
+	}
 	ball += elapsed * speed_multiplier * ball_velocity;
 
 	//---- collision handling ----
 
 	//paddles:
-	auto paddle_vs_ball = [this](glm::vec2 const &paddle) {
+	auto paddle_vs_ball = [this](glm::vec2 const &paddle, float paddle_vel, bool *hit) {
 		//compute area of overlap:
 		glm::vec2 min = glm::max(paddle - paddle_radius, ball - ball_radius);
 		glm::vec2 max = glm::min(paddle + paddle_radius, ball + ball_radius);
 
 		//if no overlap, no collision:
 		if (min.x > max.x || min.y > max.y) return;
+
+		*hit = true;
 
 		if (max.x - min.x > max.y - min.y) {
 			//wider overlap in x => bounce in y direction:
@@ -200,10 +227,56 @@ void PongMode::update(float elapsed) {
 			//warp y velocity based on offset from paddle center:
 			float vel = (ball.y - paddle.y) / (paddle_radius.y + ball_radius.y);
 			ball_velocity.y = glm::mix(ball_velocity.y, vel, 0.75f);
+
+			ball_boost = std::abs(ball.y - paddle.y) < boost_size;
+			
+			// Add curveball velocity
+			float vel_sign = glm::sign(paddle_vel);
+			bend_factor = bend_multiplier * std::min(std::abs(paddle_vel), max_bend_factor);
+			curve = -vel_sign * bend_factor * curve_multiplier;
+			bend = 0.0f;
 		}
 	};
-	paddle_vs_ball(left_paddle);
-	paddle_vs_ball(right_paddle);
+	bool hit = false;
+	paddle_vs_ball(left_paddle, player_vel, &hit);
+	if (hit)
+		last_paddle_hit = -1;
+	hit = false;
+	paddle_vs_ball(right_paddle, ai_vel, &hit);
+	if (hit)
+		last_paddle_hit = 1;
+
+	//targets:
+	{
+		if (target_hit)
+		{
+			target_hit_time += elapsed;
+			if (target_hit_time > respawn_time)
+			{
+				target.x = -target_range + mt() / float(mt.max()) * 2.0f * target_range;
+				target.y = (mt() > mt.max() / 2) ? courtY - target_radius.y : -courtY + target_radius.y;
+				target_hit = false;
+			}
+		}
+		else
+		{
+			glm::vec2 min = glm::max(target - target_radius, ball - ball_radius);
+			glm::vec2 max = glm::min(target + target_radius, ball + ball_radius);
+
+			//overlap -> update target, points
+			if (min.x <= max.x && min.y <= max.y)
+			{
+				target.x = 0.0f;
+				target.y = 0.0f;
+				target_hit_time = 0.0f;
+				target_hit = true;
+				if (last_paddle_hit == -1)
+					left_score += 1;
+				else if (last_paddle_hit == 1)
+					right_score += 1;
+			}
+		}
+	}
 
 	//court walls:
 	if (ball.y > court_radius.y - ball_radius.y) {
@@ -223,14 +296,22 @@ void PongMode::update(float elapsed) {
 		ball.x = court_radius.x - ball_radius.x;
 		if (ball_velocity.x > 0.0f) {
 			ball_velocity.x = -ball_velocity.x;
-			left_score += 1;
+			if (right_score > 0) 
+				right_score -= 1;
+			bend_factor = 0.0f;
+			curve = 0.0f;
+			ball_boost = 0;
 		}
 	}
 	if (ball.x < -court_radius.x + ball_radius.x) {
 		ball.x = -court_radius.x + ball_radius.x;
 		if (ball_velocity.x < 0.0f) {
 			ball_velocity.x = -ball_velocity.x;
-			right_score += 1;
+			if (left_score > 0)
+				left_score -= 1;
+			bend_factor = 0.0f;
+			curve = 0.0f;
+			ball_boost = 0;
 		}
 	}
 
@@ -266,6 +347,9 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 		HEX_TO_U8VEC4(0x9e7e4496), HEX_TO_U8VEC4(0xa6844887), HEX_TO_U8VEC4(0xa9864884),
 		HEX_TO_U8VEC4(0xad8a4a7c),
 	};
+	const glm::u8vec4 boost_color = HEX_TO_U8VEC4(0xd93c34ff);
+	const glm::u8vec4 target_color = HEX_TO_U8VEC4(0x42f566ff);
+	const glm::u8vec4 target_shadow_color = HEX_TO_U8VEC4(0x7db588ff);
 	#undef HEX_TO_U8VEC4
 
 	//other useful drawing constants:
@@ -301,6 +385,8 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 	draw_rectangle(left_paddle+s, paddle_radius, shadow_color);
 	draw_rectangle(right_paddle+s, paddle_radius, shadow_color);
 	draw_rectangle(ball+s, ball_radius, shadow_color);
+	if (!target_hit)
+		draw_rectangle(target+s, target_radius, target_shadow_color);
 
 	//ball's trail:
 	if (ball_trail.size() >= 2) {
@@ -334,10 +420,18 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 	//paddles:
 	draw_rectangle(left_paddle, paddle_radius, fg_color);
 	draw_rectangle(right_paddle, paddle_radius, fg_color);
-	
+	draw_rectangle(left_paddle, boost_radius, boost_color);
+	draw_rectangle(right_paddle, boost_radius, boost_color);
 
 	//ball:
-	draw_rectangle(ball, ball_radius, fg_color);
+	if (ball_boost)
+		draw_rectangle(ball, ball_radius, boost_color);
+	else
+		draw_rectangle(ball, ball_radius, fg_color);
+
+	//target:
+	if (!target_hit)
+		draw_rectangle(target, target_radius, target_color);
 
 	//scores:
 	glm::vec2 score_radius = glm::vec2(0.1f, 0.1f);
