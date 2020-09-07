@@ -16,5 +16,6 @@ Use the mouse cursor to control your paddle and hit the ball. Aim at the green t
 The ball will bounce at a steeper angle when it contacts the paddle further away from center, as with normal Pong.
 Make sure to block your opponent's shots before they hit your side of the court, or you will lose points.
 Hit curveballs by moving the paddle as you hit the ball. The curve is proportional to the speed of the paddle.
+The ball will get faster over time, and the AI paddle speed will get faster the more points you have.
 
 This game was built with [NEST](NEST.md).
